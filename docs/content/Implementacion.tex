@@ -1,233 +1,200 @@
 \section{Implementación}
 
-\subsection{Arquitectura del Software}
-
-La implementación del proyecto se estructura en un notebook de Jupyter (\texttt{tarea\_markov\_3.ipynb}) organizado en secciones modulares que corresponden a los diferentes aspectos del análisis. El entorno computacional utiliza Python 3.8+ con las bibliotecas NumPy para operaciones numéricas, Matplotlib y Seaborn para visualización, y Pandas para manejo de datos tabulares.
-
-La arquitectura sigue el principio de separación de responsabilidades: funciones de verificación validan configuraciones, algoritmos de muestreo generan configuraciones según los modelos, funciones de visualización crean representaciones gráficas, y rutinas de análisis estadístico calculan métricas de interés. Esta modularidad facilita la extensibilidad y el mantenimiento del código.
-
 \subsection{Modelo Hard-Core}
 
-\subsubsection{Verificación de Configuraciones Factibles}
-
-La función \texttt{es\_configuracion\_factible\_hardcore} implementa la verificación de la restricción de no adyacencia. Para cada vértice ocupado (valor 1), se examinan sus vecinos en las cuatro direcciones cardinales, verificando que ninguno contenga una partícula.
-
 \begin{lstlisting}[language=Python]
-def es_configuracion_factible_hardcore(config: np.ndarray) -> bool:
+def _actualizar_hardcore_vectorizado(config: np.ndarray,
+                                     mask: np.ndarray) -> None:
     """
-    Verifica si una configuración es factible para el modelo Hard-Core.
-    Una configuración es factible si no hay dos partículas adyacentes.
+    Actualiza vertices del patron usando mascara.
 
     Args:
-        config: Matriz K×K con valores 0 (vacío) o 1 (partícula)
-
-    Returns:
-        True si la configuración es factible, False en caso contrario
+        config: Matriz KxK (modificada in-place)
+        mask: Mascara booleana indicando que vertices actualizar
     """
     K = config.shape[0]
 
-    for i in range(K):
-        for j in range(K):
-            if config[i, j] == 1:
-                # Verificar vecinos (arriba, abajo, izquierda, derecha)
-                vecinos = []
-                if i > 0:
-                    vecinos.append(config[i-1, j])
-                if i < K-1:
-                    vecinos.append(config[i+1, j])
-                if j > 0:
-                    vecinos.append(config[i, j-1])
-                if j < K-1:
-                    vecinos.append(config[i, j+1])
+    # Vectorizar deteccion de vecinos ocupados
+    vecinos_ocupados = np.zeros_like(config, dtype=bool)
+    vecinos_ocupados[:-1, :] |= (config[1:, :] == 1)   # Abajo
+    vecinos_ocupados[1:, :] |= (config[:-1, :] == 1)   # Arriba
+    vecinos_ocupados[:, :-1] |= (config[:, 1:] == 1)   # Derecha
+    vecinos_ocupados[:, 1:] |= (config[:, :-1] == 1)   # Izquierda
 
-                # Si algún vecino tiene partícula, no es factible
-                if any(v == 1 for v in vecinos):
-                    return False
+    # Aplicar mascara del patron bipartito
+    update_positions = mask & ~vecinos_ocupados
+    forced_zero = mask & vecinos_ocupados
 
-    return True
+    # Forzar a 0 donde hay vecinos
+    config[forced_zero] = 0
+
+    # Generar valores aleatorios solo donde es necesario
+    num_updates = np.sum(update_positions)
+    if num_updates > 0:
+        config[update_positions] = np.random.randint(
+            0, 2, size=num_updates, dtype=np.int8)
 \end{lstlisting}
 
-La complejidad temporal de esta verificación es $O(K^2)$ en el peor caso, recorriendo todos los vértices. El manejo de condiciones de frontera se realiza mediante verificaciones explícitas de índices antes de acceder a vecinos.
+Esta función actualiza un subconjunto de vértices de la rejilla. Detecta vecinos ocupados en las cuatro direcciones cardinales, determina qué posiciones pueden actualizarse sin violar la restricción Hard-Core, y asigna valores aleatorios uniformemente entre 0 y 1 para las posiciones válidas.
 
-\subsubsection{Algoritmo de Gibbs Sampler}
-
-La función \texttt{gibbs\_sampler\_hardcore} implementa el muestreador de Gibbs para el modelo Hard-Core. El algoritmo itera $T$ veces, y en cada iteración actualiza secuencialmente todos los vértices de la rejilla en orden lexicográfico (fila por fila, columna por columna).
+\subsubsection{Gibbs Sampler}
 
 \begin{lstlisting}[language=Python]
-def gibbs_sampler_hardcore(K: int, T: int,
-                          config_inicial: np.ndarray = None) ->
-                          Tuple[np.ndarray, List[np.ndarray]]:
+def gibbs_sampler_hardcore_optimizado(K: int, T: int,
+                                      config_inicial: np.ndarray = None,
+                                      guardar_historia: bool = True
+                                      ) -> Tuple[np.ndarray,
+                                                 List[np.ndarray]]:
     """
-    Implementa el Gibbs Sampler para el modelo Hard-Core.
+    Gibbs Sampler para el modelo Hard-Core.
 
     Args:
-        K: Tamaño de la rejilla (K×K)
-        T: Número de iteraciones
-        config_inicial: Configuración inicial (si None, se genera
-                       aleatoriamente como matriz de ceros)
+        K: Tamano de la rejilla (KxK)
+        T: Numero de iteraciones
+        config_inicial: Configuracion inicial (si None, vacia)
+        guardar_historia: Si False, no guarda historia
 
     Returns:
-        config_final: Configuración final después de T iteraciones
-        historia: Lista con configuraciones guardadas en t=0, 100,
-                 1000, 5000, T
+        config_final: Configuracion final
+        historia: Lista con configuraciones en puntos especificos
     """
-    # Inicializar configuración
+    # Inicializar configuracion con dtype optimizado
     if config_inicial is None:
-        config = np.zeros((K, K), dtype=int)
+        config = np.zeros((K, K), dtype=np.int8)
     else:
-        config = config_inicial.copy()
+        config = config_inicial.copy().astype(np.int8)
 
-    # Lista para guardar configuraciones en ciertos puntos
-    historia = [config.copy()]
-    puntos_guardado = [100, 1000, 5000, T]
+    # Crear mascaras de tablero de ajedrez (UNA VEZ)
+    mask_blancas = np.zeros((K, K), dtype=bool)
+    mask_blancas[::2, ::2] = True
+    mask_blancas[1::2, 1::2] = True
+    mask_negras = ~mask_blancas
 
+    # Pre-computar puntos de guardado como set (O(1) lookup)
+    historia = None
+    if guardar_historia:
+        puntos_guardado = {100, 1000, 5000, T}
+        historia = [config.copy()]
+
+    # Loop principal con actualizacion bipartita
     for t in range(1, T + 1):
-        # Actualizar cada vértice secuencialmente
-        for i in range(K):
-            for j in range(K):
-                # Verificar vecinos
-                tiene_vecino_ocupado = False
+        # Actualizar casillas blancas (sin conflictos)
+        _actualizar_hardcore_vectorizado(config, mask_blancas)
+        # Actualizar casillas negras (sin conflictos)
+        _actualizar_hardcore_vectorizado(config, mask_negras)
 
-                if i > 0 and config[i-1, j] == 1:
-                    tiene_vecino_ocupado = True
-                if i < K-1 and config[i+1, j] == 1:
-                    tiene_vecino_ocupado = True
-                if j > 0 and config[i, j-1] == 1:
-                    tiene_vecino_ocupado = True
-                if j < K-1 and config[i, j+1] == 1:
-                    tiene_vecino_ocupado = True
-
-                # Actualizar el vértice según la restricción
-                if tiene_vecino_ocupado:
-                    config[i, j] = 0  # Forzar a estar vacío
-                else:
-                    # Elegir uniformemente 0 o 1
-                    config[i, j] = np.random.choice([0, 1])
-
-        # Guardar configuración en puntos específicos
-        if t in puntos_guardado:
+        # Guardar historia solo en puntos especificos
+        if guardar_historia and t in puntos_guardado:
             historia.append(config.copy())
 
     return config, historia
 \end{lstlisting}
 
-Para cada vértice $(i,j)$, el algoritmo determina si tiene algún vecino ocupado. Si existe al menos un vecino con partícula, el vértice se fuerza a estar vacío ($\sigma(i,j) = 0$) para mantener la factibilidad. Si todos los vecinos están vacíos, se muestrea uniformemente de $\{0, 1\}$ con probabilidad $1/2$ cada uno.
+Esta función implementa el algoritmo Gibbs Sampler para generar configuraciones del modelo Hard-Core. Inicializa la rejilla en configuración vacía, ejecuta T iteraciones actualizando casillas negras, y guarda configuraciones en puntos específicos de tiempo para análisis de convergencia.
 
-La complejidad temporal total es $O(TK^2)$, donde cada iteración requiere $O(K^2)$ operaciones para recorrer todos los vértices. La complejidad espacial es $O(K^2)$ para almacenar la configuración actual, más $O(5K^2)$ si se guarda la historia completa (configuraciones en 5 puntos temporales).
-
-\subsubsection{Visualización de Configuraciones}
-
-La función \texttt{visualizar\_configuracion\_hardcore} genera representaciones gráficas de las configuraciones usando \texttt{matplotlib.imshow} con un colormap binario: blanco para vértices vacíos (0) y negro para vértices con partículas (1).
+\subsubsection{Configuraciones factibles}
 
 \begin{lstlisting}[language=Python]
-def visualizar_configuracion_hardcore(config: np.ndarray,
-                                     titulo: str = "Configuración Hard-Core"):
+def es_configuracion_factible_hardcore_vectorizada(
+    config: np.ndarray) -> bool:
     """
-    Visualiza una configuración del modelo Hard-Core.
-
-    Args:
-        config: Matriz K×K con valores 0 (vacío) o 1 (partícula)
-        titulo: Título del gráfico
-    """
-    K = config.shape[0]
-    fig, ax = plt.subplots(figsize=(8, 8))
-
-    cmap = ListedColormap(['white', 'black'])
-    ax.imshow(config, cmap=cmap, interpolation='nearest', vmin=0, vmax=1)
-
-    # Agregar líneas de cuadrícula
-    ax.set_xticks(np.arange(-0.5, K, 1), minor=True)
-    ax.set_yticks(np.arange(-0.5, K, 1), minor=True)
-    ax.grid(which='minor', color='gray', linestyle='-', linewidth=0.5)
-
-    ax.set_xticks([])
-    ax.set_yticks([])
-
-    num_particulas = np.sum(config)
-    ax.set_title(f"{titulo}\nNúmero de partículas: {num_particulas}",
-                fontsize=12, fontweight='bold')
-
-    plt.tight_layout()
-    return fig
-\end{lstlisting}
-
-La cuadrícula se superpone usando ticks menores posicionados en los límites de las celdas, proporcionando una separación visual clara entre vértices adyacentes. El título incluye el conteo total de partículas calculado mediante \texttt{np.sum(config)}.
-
-\subsection{Modelo q-Coloraciones}
-
-\subsubsection{Verificación de Coloraciones Propias}
-
-La función \texttt{es\_coloracion\_propia} verifica que ninguna arista conecte vértices del mismo color, implementando la definición de coloración propia.
-
-\begin{lstlisting}[language=Python]
-def es_coloracion_propia(config: np.ndarray) -> bool:
-    """
-    Verifica si una coloración es propia (vértices adyacentes tienen
-    colores distintos).
-
-    Args:
-        config: Matriz K×K con valores en {0, 1, ..., q-1}
-               representando colores
+    Verifica si configuracion es factible (vectorizada).
 
     Returns:
-        True si es coloración propia, False en caso contrario
+        True si es factible (sin particulas adyacentes)
     """
-    K = config.shape[0]
+    particulas = (config == 1)
 
-    for i in range(K):
-        for j in range(K):
-            color_actual = config[i, j]
+    # Detectar colisiones en todas las direcciones simultaneamente
+    colisiones_h = particulas[:, :-1] & particulas[:, 1:]
+    colisiones_v = particulas[:-1, :] & particulas[1:, :]
 
-            # Verificar vecinos
-            if i > 0 and config[i-1, j] == color_actual:
-                return False
-            if i < K-1 and config[i+1, j] == color_actual:
-                return False
-            if j > 0 and config[i, j-1] == color_actual:
-                return False
-            if j < K-1 and config[i, j+1] == color_actual:
-                return False
-
-    return True
+    return not (np.any(colisiones_h) or np.any(colisiones_v))
 \end{lstlisting}
 
-\subsubsection{Gibbs Sampler para q-Coloraciones}
+Esta función verifica si una configuración cumple con la restricción Hard-Core. Identifica todas las posiciones con partículas, detecta colisiones horizontales y verticales, y retorna \texttt{True} únicamente si no existe ningún par de partículas adyacentes.
 
-El algoritmo \texttt{gibbs\_sampler\_coloracion} extiende el enfoque del modelo Hard-Core al contexto de coloraciones. Para cada vértice, se identifican los colores de sus vecinos y se muestrea uniformemente del conjunto de colores válidos (aquellos no utilizados por vecinos adyacentes).
+\subsubsection{Generación Paralela de Muestras}
 
 \begin{lstlisting}[language=Python]
-def gibbs_sampler_coloracion(K: int, q: int, T: int,
-                            config_inicial: np.ndarray = None) ->
-                            Tuple[np.ndarray, List[np.ndarray]]:
+def generar_muestras_hardcore_paralelo(K: int, T: int,
+                                       num_muestras: int,
+                                       base_seed: int = 42,
+                                       n_jobs: int = None
+                                       ) -> np.ndarray:
     """
-    Implementa el Gibbs Sampler para q-coloraciones propias.
+    Genera multiples muestras en paralelo manteniendo
+    reproducibilidad.
 
     Args:
-        K: Tamaño de la rejilla (K×K)
-        q: Número de colores disponibles
-        T: Número de iteraciones
-        config_inicial: Configuración inicial (si None, se genera
-                       aleatoriamente)
+        K, T: Parametros del sampler
+        num_muestras: Numero de muestras a generar
+        base_seed: Semilla base (se genera seed + i por muestra)
+        n_jobs: Numero de workers (None = cpu_count - 1)
 
     Returns:
-        config_final: Configuración final después de T iteraciones
+        Array con numero de particulas de cada muestra
+    """
+    if n_jobs is None:
+        n_jobs = max(1, cpu_count() - 1)
+
+    # Seeds deterministicas para reproducibilidad
+    seeds = [base_seed + i for i in range(num_muestras)]
+    args_list = [(seed, K, T) for seed in seeds]
+
+    with Pool(processes=n_jobs) as pool:
+        resultados = pool.map(
+            _generar_muestra_hardcore_wrapper, args_list)
+
+    return np.array(resultados)
+\end{lstlisting}
+
+Esta función genera múltiples configuraciones independientes del modelo Hard-Core ejecutándolas en paralelo. 
+
+\subsection{Modelo q-Coloraciones - Implementación}
+
+\subsubsection{Gibbs Sampler para Coloraciones}
+
+\begin{lstlisting}[language=Python]
+def gibbs_sampler_coloracion_optimizado(K: int, q: int, T: int,
+                                        config_inicial: np.ndarray = None,
+                                        guardar_historia: bool = True
+                                        ) -> Tuple[np.ndarray,
+                                                   List[np.ndarray]]:
+    """
+    Gibbs Sampler para q-coloraciones.
+
+    Args:
+        K: Tamano de la rejilla (KxK)
+        q: Numero de colores disponibles
+        T: Numero de iteraciones
+        config_inicial: Configuracion inicial
+        guardar_historia: Si True, guarda historia
+
+    Returns:
+        config_final: Configuracion final
         historia: Lista con configuraciones guardadas
     """
-    # Inicializar configuración
+    # Inicializar con dtype optimizado
     if config_inicial is None:
-        config = np.random.randint(0, q, size=(K, K))
+        config = np.random.randint(0, q, size=(K, K),
+                                   dtype=np.int8)
     else:
-        config = config_inicial.copy()
+        config = config_inicial.copy().astype(np.int8)
 
-    historia = [config.copy()]
-    puntos_guardado = [100, 1000, 5000, T]
+    # Pre-computar puntos guardado
+    historia = None
+    if guardar_historia:
+        puntos_guardado = {100, 1000, 5000, T}
+        historia = [config.copy()]
+
+    colores_vecinos = set()
 
     for t in range(1, T + 1):
-        # Actualizar cada vértice secuencialmente
         for i in range(K):
             for j in range(K):
-                # Obtener colores de vecinos
-                colores_vecinos = set()
+                # Reutilizar set existente
+                colores_vecinos.clear()
 
                 if i > 0:
                     colores_vecinos.add(config[i-1, j])
@@ -238,114 +205,60 @@ def gibbs_sampler_coloracion(K: int, q: int, T: int,
                 if j < K-1:
                     colores_vecinos.add(config[i, j+1])
 
-                # Colores válidos para este vértice
-                colores_validos = [c for c in range(q)
-                                  if c not in colores_vecinos]
+                # Calcular colores validos
+                if len(colores_vecinos) < q:
+                    colores_validos = [c for c in range(q)
+                                      if c not in colores_vecinos]
+                    idx = np.random.randint(0, len(colores_validos))
+                    config[i, j] = colores_validos[idx]
 
-                if len(colores_validos) > 0:
-                    # Elegir uniformemente un color válido
-                    config[i, j] = np.random.choice(colores_validos)
-
-        # Guardar configuración en puntos específicos
-        if t in puntos_guardado:
+        if guardar_historia and t in puntos_guardado:
             historia.append(config.copy())
 
     return config, historia
 \end{lstlisting}
 
-El conjunto de colores de vecinos se construye utilizando una estructura \texttt{set} de Python para evitar duplicados. La comprensión de lista \texttt{[c for c in range(q) if c not in colores\_vecinos]} genera eficientemente el conjunto de colores válidos. La condición \texttt{if len(colores\_validos) > 0} previene errores en casos degenerados, aunque para rejillas bidimensionales con $q \geq 2$ siempre existen colores válidos.
+Esta función implementa el algoritmo Gibbs Sampler para generar q-coloraciones propias. Inicializa la rejilla con colores aleatorios.
 
-La complejidad temporal es $O(TK^2 q)$ en el peor caso, donde el factor $q$ proviene de la construcción del conjunto de colores válidos. En la práctica, para $q$ pequeño (como $q=3$), este factor es constante.
-
-\subsubsection{Visualización de Coloraciones}
-
-La visualización de coloraciones utiliza colormaps perceptualmente uniformes de Matplotlib. Para $q \leq 10$ colores se usa \texttt{tab10}, y para $q > 10$ se usa \texttt{tab20}.
+\subsubsection{Coloraciones factibles}
 
 \begin{lstlisting}[language=Python]
-def visualizar_coloracion(config: np.ndarray, q: int,
-                         titulo: str = "q-Coloración"):
+def es_coloracion_propia_vectorizada(config: np.ndarray) -> bool:
     """
-    Visualiza una configuración de q-coloración.
+    Verifica si coloracion es propia (vectorizada).
 
-    Args:
-        config: Matriz K×K con valores en {0, 1, ..., q-1}
-        q: Número de colores
-        titulo: Título del gráfico
+    Returns:
+        True si vertices adyacentes tienen colores distintos
     """
-    K = config.shape[0]
-    fig, ax = plt.subplots(figsize=(8, 8))
-
-    # Crear colormap distinguible
-    if q <= 10:
-        colores = plt.cm.tab10(np.linspace(0, 1, q))
-    else:
-        colores = plt.cm.tab20(np.linspace(0, 1, q))
-
-    cmap = ListedColormap(colores)
-    im = ax.imshow(config, cmap=cmap, interpolation='nearest',
-                   vmin=0, vmax=q-1)
-
-    # Agregar cuadrícula
-    ax.set_xticks(np.arange(-0.5, K, 1), minor=True)
-    ax.set_yticks(np.arange(-0.5, K, 1), minor=True)
-    ax.grid(which='minor', color='black', linestyle='-',
-            linewidth=1.5)
-
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.set_title(titulo, fontsize=12, fontweight='bold')
-
-    # Añadir barra de colores
-    cbar = plt.colorbar(im, ax=ax, ticks=np.arange(q))
-    cbar.set_label('Color', fontsize=10, fontweight='bold')
-
-    plt.tight_layout()
-    return fig
+    colision_h = (config[:, :-1] == config[:, 1:])
+    colision_v = (config[:-1, :] == config[1:, :])
+    return not (np.any(colision_h) or np.any(colision_v))
 \end{lstlisting}
 
-La barra de colores lateral proporciona una leyenda explícita del mapeo entre valores numéricos y colores visuales, facilitando la interpretación de las configuraciones.
+Esta función verifica si una coloración es propia. Compara colores de celdas adyacentes horizontalmente y verticalmente, detecta cualquier par de vértices adyacentes con el mismo color, y retorna \texttt{True} únicamente si todos los vértices adyacentes tienen colores diferentes.
 
-\subsection{Metodología Experimental}
+\subsubsection{Generación Paralela de Coloraciones}
 
-\subsubsection{Parámetros de Simulación}
+\begin{lstlisting}[language=Python]
+def generar_muestras_coloracion_paralelo(K: int, q: int, T: int,
+                                         num_muestras: int,
+                                         base_seed: int = 42,
+                                         n_jobs: int = None
+                                         ) -> np.ndarray:
+    """
+    Genera multiples muestras de q-coloraciones en paralelo.
+    """
+    if n_jobs is None:
+        n_jobs = max(1, cpu_count() - 1)
 
-Los experimentos se diseñaron para explorar el comportamiento de ambos modelos bajo diferentes escalas y condiciones:
+    seeds = [base_seed + i for i in range(num_muestras)]
+    args_list = [(seed, K, q, T) for seed in seeds]
 
-\textbf{Modelo Hard-Core:}
-\begin{itemize}
-\item Tamaños de rejilla: $K \in \{3, 10, 20\}$
-\item Iteraciones por simulación: $T = 10000$
-\item Número de muestras independientes para análisis estadístico: 500
-\item Puntos de guardado de configuraciones: $t \in \{0, 100, 1000, 5000, 10000\}$
-\end{itemize}
+    with Pool(processes=n_jobs) as pool:
+        configs = pool.map(
+            _generar_muestra_coloracion_wrapper, args_list)
 
-\textbf{Modelo q-Coloraciones:}
-\begin{itemize}
-\item Tamaños de rejilla: $K \in \{3, 10, 20\}$
-\item Número de colores: $q \in \{2, 3, 5\}$
-\item Iteraciones por simulación: $T = 10000$
-\item Número de muestras independientes: 500
-\end{itemize}
+    return np.array(configs)
+\end{lstlisting}
 
-\subsubsection{Métricas de Evaluación}
-
-Para el modelo Hard-Core, se calcularon:
-\begin{itemize}
-\item Número total de partículas: $N(\sigma) = \sum_{v \in V} \sigma(v)$
-\item Densidad de partículas: $\rho = N(\sigma) / K^2$
-\item Media y desviación estándar del número de partículas sobre muestras independientes
-\item Evolución temporal de las distribuciones en $t = 100, 1000, 5000, 10000$
-\end{itemize}
-
-Para el modelo q-Coloraciones, se analizaron:
-\begin{itemize}
-\item Distribución de vértices por color: $N_c = |\{v : c(v) = c\}|$ para $c \in \{0, \ldots, q-1\}$
-\item Media y desviación estándar de $N_c$ sobre muestras independientes
-\item Verificación de coloración propia en configuraciones finales
-\end{itemize}
-
-\subsubsection{Generación de Visualizaciones}
-
-Todas las figuras se exportan en formato PNG con resolución de 150 DPI y se guardan en el directorio \texttt{../images/}. Los nombres de archivo siguen convenciones descriptivas que incluyen el modelo, parámetros y tipo de análisis (e.g., \texttt{hardcore\_evolucion\_K10.png}, \texttt{coloracion\_distribucion\_colores.png}).
-
-Las visualizaciones comparativas utilizan subplots organizados horizontalmente para mostrar evolución temporal, y gráficos de barras agrupadas o boxplots para comparaciones entre configuraciones.
+Esta función genera múltiples q-coloraciones en paralelo.

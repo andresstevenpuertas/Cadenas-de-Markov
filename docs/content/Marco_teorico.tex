@@ -1,155 +1,26 @@
-\section{Marco Teórico}
+\section{Introducción}
 
-\subsection{Cadenas de Markov y Muestreo de Gibbs}
-
-Una cadena de Markov es un proceso estocástico $\{X_n\}_{n \geq 0}$ con espacio de estados $S$ que satisface la propiedad de Markov: $P(X_{n+1} \in A | X_n = x_n, X_{n-1} = x_{n-1}, \ldots, X_0 = x_0) = P(X_{n+1} \in A | X_n = x_n)$ para todo $A \subseteq S$. Esta propiedad establece que el futuro del proceso depende únicamente del estado presente, no de la historia pasada.
-
-El muestreo de Gibbs es un algoritmo de cadena de Markov Monte Carlo (MCMC) utilizado para generar muestras de una distribución de probabilidad multivariada cuando el muestreo directo es difícil pero el muestreo de distribuciones condicionales es factible. Para un vector aleatorio $\mathbf{X} = (X_1, X_2, \ldots, X_d)$ con distribución objetivo $\pi(\mathbf{x})$, el algoritmo actualiza iterativamente cada componente muestreando de su distribución condicional completa:
-
-\begin{equation}
-X_i^{(t+1)} \sim \pi(x_i | X_1^{(t+1)}, \ldots, X_{i-1}^{(t+1)}, X_{i+1}^{(t)}, \ldots, X_d^{(t)})
-\end{equation}
-
-Bajo condiciones regulares de ergodicidad e irreducibilidad, la cadena de Markov generada por el muestreador de Gibbs converge a la distribución estacionaria $\pi$. El teorema de convergencia establece que $\lim_{t \to \infty} \|\pi^{(t)} - \pi\|_{TV} = 0$, donde $\|\cdot\|_{TV}$ denota la distancia de variación total.
+Este documento presenta la implementación de dos modelos de cadenas de Markov utilizando el algoritmo Gibbs Sampler:
 
 \subsection{Modelo Hard-Core}
 
-\subsubsection{Definición y Espacio de Estados}
+El modelo Hard-Core representa configuraciones de partículas en una rejilla donde ninguna pareja de partículas puede ser adyacente. Una configuración válida cumple que para cada par de vértices adyacentes, al menos uno está vacío.
 
-El modelo Hard-Core es un modelo de gas reticular que describe configuraciones de partículas en una rejilla donde las partículas ejercen una restricción de exclusión: ninguna pareja de partículas puede ocupar sitios adyacentes. Formalmente, para una rejilla $G = (V, E)$ con conjunto de vértices $V$ y conjunto de aristas $E$, una configuración $\sigma: V \to \{0, 1\}$ es factible si para toda arista $(i,j) \in E$, se cumple que $\sigma(i) \cdot \sigma(j) = 0$.
-
-El espacio de configuraciones factibles se define como:
-\begin{equation}
-\Omega_{HC} = \{\sigma \in \{0,1\}^{|V|} : \sigma(i)\sigma(j) = 0 \text{ para todo } (i,j) \in E\}
-\end{equation}
-
-Para una rejilla bidimensional $K \times K$ con conectividad tipo Von Neumann (vecinos arriba, abajo, izquierda, derecha), cada vértice $(i,j)$ tiene a lo sumo cuatro vecinos. La cardinalidad del espacio $|\Omega_{HC}|$ crece exponencialmente con $K$ pero es significativamente menor que $2^{K^2}$ debido a la restricción de no adyacencia.
-
-\subsubsection{Distribución Uniforme y Muestreo}
-
-La distribución objetivo del modelo Hard-Core asigna probabilidad uniforme a todas las configuraciones factibles:
-\begin{equation}
-\pi_{HC}(\sigma) = \begin{cases}
-\frac{1}{|\Omega_{HC}|} & \text{si } \sigma \in \Omega_{HC} \\
-0 & \text{en caso contrario}
-\end{cases}
-\end{equation}
-
-El cálculo directo de $|\Omega_{HC}|$ es un problema \#P-completo, lo que hace impracticable la normalización explícita. El muestreador de Gibbs evita este problema operando directamente con las distribuciones condicionales. Para un vértice $v \in V$, la distribución condicional viene dada por:
-
-\begin{equation}
-\pi(\sigma(v) | \sigma(V \setminus \{v\})) = \begin{cases}
-1 & \text{si } \sigma(v) = 0 \\
-0 & \text{si } \sigma(v) = 1 \text{ y existe } u \sim v \text{ con } \sigma(u) = 1 \\
-\frac{1}{2} & \text{si } \sigma(v) \in \{0,1\} \text{ y } \sigma(u) = 0 \text{ para todo } u \sim v
-\end{cases}
-\end{equation}
-
-donde $u \sim v$ denota que $u$ es vecino de $v$.
-
-\subsubsection{Propiedades Estadísticas}
-
-La densidad esperada de partículas $\rho = \mathbb{E}[\sum_{v \in V} \sigma(v)] / |V|$ depende de la estructura de la rejilla. Para rejillas bidimensionales infinitas, resultados de física estadística establecen que $\rho \approx 0.36788$ en el límite termodinámico. Para rejillas finitas $K \times K$, los efectos de borde modifican ligeramente esta densidad.
-
-La función de autocorrelación temporal mide la dependencia entre configuraciones sucesivas:
-\begin{equation}
-\rho_{\tau} = \text{Corr}(\sigma^{(t)}, \sigma^{(t+\tau)}) = \frac{\mathbb{E}[\sigma^{(t)} \cdot \sigma^{(t+\tau)}] - \mathbb{E}[\sigma^{(t)}]^2}{\text{Var}(\sigma^{(t)})}
-\end{equation}
-
-El tiempo de mezcla $t_{mix}(\epsilon)$ se define como el mínimo número de iteraciones requerido para que $\|\pi^{(t)} - \pi\|_{TV} \leq \epsilon$. Para el modelo Hard-Core en rejillas bidimensionales, se ha demostrado que $t_{mix}(\epsilon) = O(K^2 \log K)$ bajo condiciones apropiadas.
-
-\subsection{Modelo de q-Coloraciones}
-
-\subsubsection{Definición y Coloraciones Propias}
-
-Una q-coloración de un grafo $G = (V, E)$ es una función $c: V \to \{0, 1, \ldots, q-1\}$ que asigna a cada vértice uno de $q$ colores. Una coloración es \textit{propia} si vértices adyacentes tienen colores distintos: $c(i) \neq c(j)$ para toda arista $(i,j) \in E$.
-
-El espacio de configuraciones válidas es:
-\begin{equation}
-\Omega_q = \{c \in \{0,1,\ldots,q-1\}^{|V|} : c(i) \neq c(j) \text{ para todo } (i,j) \in E\}
-\end{equation}
-
-El número cromático $\chi(G)$ es el mínimo $q$ para el cual existe una q-coloración propia. Para una rejilla bidimensional, $\chi(G) = 2$ si y solo si el grafo es bipartito, lo cual se cumple para rejillas rectangulares. Sin embargo, para $q \geq \chi(G)$, existen múltiples coloraciones propias.
-
-\subsubsection{Distribución Uniforme y Algoritmo de Gibbs}
-
-La distribución objetivo asigna probabilidad uniforme a todas las q-coloraciones propias:
-\begin{equation}
-\pi_q(c) = \begin{cases}
-\frac{1}{|\Omega_q|} & \text{si } c \in \Omega_q \\
-0 & \text{en caso contrario}
-\end{cases}
-\end{equation}
-
-El muestreador de Gibbs para q-coloraciones actualiza el color de cada vértice $v$ muestreando uniformemente del conjunto de colores válidos dado el estado actual de sus vecinos. Para un vértice $v$ con vecindario $N(v) = \{u \in V : (u,v) \in E\}$, la distribución condicional es:
-
-\begin{equation}
-\pi(c(v) | c(V \setminus \{v\})) = \begin{cases}
-\frac{1}{|C_v|} & \text{si } c(v) \in C_v \\
-0 & \text{en caso contrario}
-\end{cases}
-\end{equation}
-
-donde $C_v = \{0, 1, \ldots, q-1\} \setminus \{c(u) : u \in N(v)\}$ es el conjunto de colores disponibles para $v$.
-
-\subsubsection{Convergencia y Tiempo de Mezcla}
-
-Para q-coloraciones en rejillas bidimensionales, el tiempo de mezcla depende críticamente de la relación entre $q$ y el grado máximo $\Delta$ del grafo. El teorema de Vigoda establece que para $q \geq 11\Delta/6$, el muestreador de Gibbs tiene convergencia rápida: $t_{mix}(\epsilon) = O(n \log n)$, donde $n = |V|$.
-
-Para rejillas $K \times K$ con $\Delta = 4$ y $q \geq 8$, se garantiza mezcla rápida. Sin embargo, evidencia numérica sugiere que el algoritmo converge eficientemente incluso para valores pequeños de $q$ como $q = 3$.
-
-La entropía de la distribución de colores mide la uniformidad de la asignación:
-\begin{equation}
-H = -\sum_{i=0}^{q-1} p_i \log p_i
-\end{equation}
-
-donde $p_i = \mathbb{E}[|\{v : c(v) = i\}|] / |V|$ es la fracción promedio de vértices con color $i$. Para distribuciones perfectamente uniformes, $H = \log q$ y $p_i = 1/q$ para todo $i$.
-
-\subsection{Convergencia del Muestreador de Gibbs}
-
-\subsubsection{Teoría de Acoplamiento}
-
-El acoplamiento es una técnica fundamental para analizar la convergencia de cadenas de Markov. Dos copias de la cadena $X^{(1)}_t$ y $X^{(2)}_t$ iniciadas desde estados diferentes se evolucionan simultáneamente usando las mismas realizaciones de variables aleatorias. El tiempo de acoplamiento $\tau$ es el primer tiempo en que $X^{(1)}_\tau = X^{(2)}_\tau$.
-
-El lema fundamental del acoplamiento establece que:
-\begin{equation}
-\|P^t(x, \cdot) - \pi(\cdot)\|_{TV} \leq P_x(\tau > t)
-\end{equation}
-
-donde $P^t(x, \cdot)$ es la distribución después de $t$ pasos iniciando en $x$, y $\pi$ es la distribución estacionaria.
-
-\subsubsection{Criterios de Convergencia Empíricos}
-
-En la práctica, la convergencia se evalúa mediante:
-
-\begin{enumerate}
-\item \textbf{Estabilización de estadísticas:} Monitorear la media móvil $\bar{\sigma}_t = \frac{1}{w}\sum_{s=t-w+1}^{t} f(\sigma^{(s)})$ de una función de interés $f$ (e.g., número de partículas). La convergencia se sugiere cuando $|\bar{\sigma}_t - \bar{\sigma}_{t+\delta}| < \epsilon$ para $\delta$ suficientemente grande.
-
-\item \textbf{Autocorrelación integrada:} El tiempo de autocorrelación integrado $\tau_{int} = \sum_{\tau=0}^{\infty} \rho_\tau$ estima el número efectivo de muestras independientes. El tamaño efectivo de muestra es $n_{eff} = T / (2\tau_{int})$.
-
-\item \textbf{Análisis de múltiples cadenas:} Ejecutar $m$ cadenas independientes y comparar variabilidad entre cadenas versus dentro de cadenas usando el estadístico de Gelman-Rubin $\hat{R}$. Valores $\hat{R} < 1.1$ sugieren convergencia.
-\end{enumerate}
-
-\subsection{Implementación Computacional}
-
-\subsubsection{Algoritmo Secuencial vs. Paralelo}
-
-El muestreador de Gibbs puede implementarse en dos variantes:
-
-\textbf{Actualización secuencial (systematic scan):} Los vértices se actualizan en orden determinístico, típicamente recorriendo la rejilla fila por fila. Esta estrategia garantiza que la cadena resultante es aperiódica e irreducible.
-
-\textbf{Actualización aleatoria (random scan):} En cada iteración, se selecciona un vértice uniformemente al azar para actualizar. Esta variante también garantiza convergencia pero puede tener tiempo de mezcla diferente.
-
-Para ambos modelos (Hard-Core y q-coloraciones), utilizamos actualización secuencial debido a su implementación directa y propiedades de convergencia bien establecidas.
-
-\subsubsection{Complejidad Computacional}
-
-Para una rejilla $K \times K$ con $T$ iteraciones:
-
+El objetivo es generar muestras de configuraciones factibles distribuidas uniformemente, calculando estadísticas como:
 \begin{itemize}
-\item \textbf{Hard-Core:} Cada actualización de vértice requiere verificar a lo sumo 4 vecinos, resultando en complejidad $O(1)$ por vértice. Una iteración completa tiene complejidad $O(K^2)$, y $T$ iteraciones requieren $O(TK^2)$ operaciones.
-
-\item \textbf{q-Coloraciones:} Cada actualización requiere identificar colores de vecinos (hasta 4 verificaciones) y muestrear uniformemente de los colores disponibles. La complejidad por vértice es $O(q)$ en el peor caso, resultando en $O(TK^2 q)$ para $T$ iteraciones completas.
+\item Número promedio de partículas
+\item Densidad de ocupación
+\item Convergencia de la distribución
 \end{itemize}
 
-El almacenamiento de la configuración actual requiere $O(K^2)$ memoria, independiente del número de iteraciones (excepto si se guarda la historia completa).
+\subsection{Modelo q-Coloraciones}
+
+El modelo de q-coloraciones asigna colores a los vértices de una rejilla de manera que vértices adyacentes tengan colores diferentes. Este problema es fundamental en teoría de grafos.
+
+El objetivo es generar coloraciones propias distribuidas uniformemente y analizar:
+\begin{itemize}
+\item Distribución de vértices por color
+\item Verificación de coloraciones válidas
+\item Convergencia a la distribución estacionaria
+\end{itemize}
+
